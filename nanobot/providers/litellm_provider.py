@@ -13,7 +13,7 @@ class LiteLLMProvider(LLMProvider):
     """
     LLM provider using LiteLLM for multi-provider support.
     
-    Supports OpenRouter, Anthropic, OpenAI, Gemini, and many other providers through
+    Supports OpenRouter, Anthropic, OpenAI, Gemini, Ollama, and many other providers through
     a unified interface.
     """
     
@@ -32,14 +32,23 @@ class LiteLLMProvider(LLMProvider):
             (api_base and "openrouter" in api_base)
         )
         
+        # Detect Ollama by api_base containing "ollama" or port 11434
+        self.is_ollama = (
+            (api_base and ("ollama" in api_base.lower() or ":11434" in api_base)) or
+            (default_model and default_model.startswith("ollama/"))
+        )
+        
         # Track if using custom endpoint (vLLM, etc.)
-        self.is_vllm = bool(api_base) and not self.is_openrouter
+        self.is_vllm = bool(api_base) and not self.is_openrouter and not self.is_ollama
         
         # Configure LiteLLM based on provider
         if api_key:
             if self.is_openrouter:
                 # OpenRouter mode - set key
                 os.environ["OPENROUTER_API_KEY"] = api_key
+            elif self.is_ollama:
+                # Ollama usually doesn't need API key, but set a placeholder
+                os.environ.setdefault("OLLAMA_API_KEY", api_key or "ollama")
             elif self.is_vllm:
                 # vLLM/custom endpoint - uses OpenAI-compatible API
                 os.environ["OPENAI_API_KEY"] = api_key
@@ -53,6 +62,9 @@ class LiteLLMProvider(LLMProvider):
                 os.environ.setdefault("ZHIPUAI_API_KEY", api_key)
             elif "groq" in default_model:
                 os.environ.setdefault("GROQ_API_KEY", api_key)
+        elif self.is_ollama:
+            # Ollama doesn't require API key for local usage
+            os.environ.setdefault("OLLAMA_API_KEY", "ollama")
         
         if api_base:
             litellm.api_base = api_base
@@ -86,6 +98,11 @@ class LiteLLMProvider(LLMProvider):
         # For OpenRouter, prefix model name if not already prefixed
         if self.is_openrouter and not model.startswith("openrouter/"):
             model = f"openrouter/{model}"
+        
+        # For Ollama, ensure ollama/ prefix if not already present
+        # Handle cases like "llama2" -> "ollama/llama2" or "qwen:7b" -> "ollama/qwen:7b"
+        if self.is_ollama and not model.startswith("ollama/"):
+            model = f"ollama/{model}"
         
         # For Zhipu/Z.ai, ensure prefix is present
         # Handle cases like "glm-4.7-flash" -> "zai/glm-4.7-flash"

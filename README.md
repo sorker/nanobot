@@ -127,7 +127,52 @@ nanobot agent -m "What is 2+2?"
 
 That's it! You have a working AI assistant in 2 minutes.
 
-## 🖥️ Local Models (vLLM)
+## 🖥️ Local Models
+
+Run nanobot with your own local models using Ollama or vLLM.
+
+### Ollama (Recommended for Local)
+
+[Ollama](https://ollama.com/) makes it easy to run open-source LLMs locally.
+
+**1. Install and start Ollama**
+
+```bash
+# Install Ollama from https://ollama.com/download
+# Pull a model
+ollama pull qwen2.5:7b
+
+# Ollama runs on http://localhost:11434 by default
+```
+
+**2. Configure** (`~/.nanobot/config.json`)
+
+```json
+{
+  "providers": {
+    "ollama": {
+      "apiBase": "http://localhost:11434"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "qwen2.5:7b"
+    }
+  }
+}
+```
+
+**3. Chat**
+
+```bash
+nanobot agent -m "Hello from Ollama!"
+```
+
+> [!TIP]
+> Popular models: `qwen2.5:7b`, `llama3.1:8b`, `mistral:7b`, `deepseek-r1:7b`
+> See all models at [ollama.com/library](https://ollama.com/library)
+
+### vLLM
 
 Run nanobot with your own local models using vLLM or any OpenAI-compatible server.
 
@@ -308,6 +353,7 @@ Config file: `~/.nanobot/config.json`
 | `openai` | LLM (GPT direct) | [platform.openai.com](https://platform.openai.com) |
 | `groq` | LLM + **Voice transcription** (Whisper) | [console.groq.com](https://console.groq.com) |
 | `gemini` | LLM (Gemini direct) | [aistudio.google.com](https://aistudio.google.com) |
+| `ollama` | LLM (local models, no API key needed) | [ollama.com](https://ollama.com) |
 
 
 <details>

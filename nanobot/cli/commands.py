@@ -178,15 +178,26 @@ def gateway(
     # Create components
     bus = MessageBus()
     
-    # Create provider (supports OpenRouter, Anthropic, OpenAI, Bedrock)
+    # Create provider (supports OpenRouter, Anthropic, OpenAI, Bedrock, Ollama, etc.)
     api_key = config.get_api_key()
     api_base = config.get_api_base()
     model = config.agents.defaults.model
     is_bedrock = model.startswith("bedrock/")
+    is_ollama = (
+        model.startswith("ollama/") or 
+        (api_base and ("ollama" in api_base.lower() or ":11434" in api_base))
+    )
 
-    if not api_key and not is_bedrock:
+    if not api_key and not is_bedrock and not is_ollama:
         console.print("[red]Error: No API key configured.[/red]")
-        console.print("Set one in ~/.nanobot/config.json under providers.openrouter.apiKey")
+        console.print("Set one in ~/.nanobot/config.json under one of the providers:")
+        console.print("  - providers.openrouter.apiKey (for OpenRouter)")
+        console.print("  - providers.anthropic.apiKey (for Anthropic Claude)")
+        console.print("  - providers.openai.apiKey (for OpenAI)")
+        console.print("  - providers.ollama.apiBase (for local Ollama, e.g., http://localhost:11434)")
+        console.print("  - providers.gemini.apiKey (for Google Gemini)")
+        console.print("  - providers.zhipu.apiKey (for Zhipu AI)")
+        console.print("  - providers.groq.apiKey (for Groq)")
         raise typer.Exit(1)
     
     provider = LiteLLMProvider(
