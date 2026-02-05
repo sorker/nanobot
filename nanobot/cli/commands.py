@@ -197,6 +197,7 @@ def gateway(
         console.print("  - providers.ollama.apiBase (for local Ollama, e.g., http://localhost:11434)")
         console.print("  - providers.gemini.apiKey (for Google Gemini)")
         console.print("  - providers.zhipu.apiKey (for Zhipu AI)")
+        console.print("  - providers.dashscope.apiKey (for Alibaba DashScope/Qwen)")
         console.print("  - providers.groq.apiKey (for Groq)")
         raise typer.Exit(1)
     

@@ -5,6 +5,7 @@ from typing import Any
 
 import litellm
 from litellm import acompletion
+from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
@@ -26,30 +27,16 @@ class LiteLLMProvider(LLMProvider):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         
-        # Detect OpenRouter by api_key prefix or explicit api_base
-        self.is_openrouter = (
-            (api_key and api_key.startswith("sk-or-")) or
-            (api_base and "openrouter" in api_base)
-        )
-        
-        # Detect Ollama by api_base containing "ollama" or port 11434
-        self.is_ollama = (
-            (api_base and ("ollama" in api_base.lower() or ":11434" in api_base)) or
-            (default_model and default_model.startswith("ollama/"))
-        )
-        
-        # Track if using custom endpoint (vLLM, etc.)
-        self.is_vllm = bool(api_base) and not self.is_openrouter and not self.is_ollama
-        
         # Configure LiteLLM based on provider
         if api_key:
-            if self.is_openrouter:
+            if "openrouter" in default_model:
                 # OpenRouter mode - set key
                 os.environ["OPENROUTER_API_KEY"] = api_key
-            elif self.is_ollama:
+            elif "ollama" in default_model:
                 # Ollama usually doesn't need API key, but set a placeholder
                 os.environ.setdefault("OLLAMA_API_KEY", api_key or "ollama")
-            elif self.is_vllm:
+                os.environ["OLLAMA_API_BASE"] = api_base
+            elif "vllm" in default_model:
                 # vLLM/custom endpoint - uses OpenAI-compatible API
                 os.environ["OPENAI_API_KEY"] = api_key
             elif "anthropic" in default_model:
@@ -60,12 +47,12 @@ class LiteLLMProvider(LLMProvider):
                 os.environ.setdefault("GEMINI_API_KEY", api_key)
             elif "zhipu" in default_model or "glm" in default_model or "zai" in default_model:
                 os.environ.setdefault("ZHIPUAI_API_KEY", api_key)
+            elif "dashscope" in default_model:
+                os.environ.setdefault("DASHSCOPE_API_KEY", api_key)
             elif "groq" in default_model:
                 os.environ.setdefault("GROQ_API_KEY", api_key)
-        elif self.is_ollama:
-            # Ollama doesn't require API key for local usage
-            os.environ.setdefault("OLLAMA_API_KEY", "ollama")
         
+        # Set global api_base for non-Ollama providers
         if api_base:
             litellm.api_base = api_base
         
@@ -94,28 +81,20 @@ class LiteLLMProvider(LLMProvider):
             LLMResponse with content and/or tool calls.
         """
         model = model or self.default_model
-        
-        # For OpenRouter, prefix model name if not already prefixed
-        if self.is_openrouter and not model.startswith("openrouter/"):
-            model = f"openrouter/{model}"
-        
-        # For Ollama, ensure ollama/ prefix if not already present
-        # Handle cases like "llama2" -> "ollama/llama2" or "qwen:7b" -> "ollama/qwen:7b"
-        if self.is_ollama and not model.startswith("ollama/"):
-            model = f"ollama/{model}"
-        
+               
         # For Zhipu/Z.ai, ensure prefix is present
         # Handle cases like "glm-4.7-flash" -> "zai/glm-4.7-flash"
         if ("glm" in model.lower() or "zhipu" in model.lower()) and not (
             model.startswith("zhipu/") or 
             model.startswith("zai/") or 
-            model.startswith("openrouter/")
+            model.startswith("openrouter/") or
+            model.startswith("ollama/")
         ):
             model = f"zai/{model}"
         
         # For vLLM, use hosted_vllm/ prefix per LiteLLM docs
         # Convert openai/ prefix to hosted_vllm/ if user specified it
-        if self.is_vllm:
+        if "vllm" in model.lower():
             model = f"hosted_vllm/{model}"
         
         # For Gemini, ensure gemini/ prefix if not already present
