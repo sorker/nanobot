@@ -628,6 +628,183 @@ def cron_run(
 
 
 # ============================================================================
+# Plugin Marketplace Commands
+# ============================================================================
+
+
+plugin_app = typer.Typer(help="Manage plugins and skills from marketplace")
+app.add_typer(plugin_app, name="plugin")
+
+
+marketplace_app = typer.Typer(help="Plugin marketplace operations")
+plugin_app.add_typer(marketplace_app, name="marketplace")
+
+
+@marketplace_app.command("add")
+def marketplace_add(
+    repo: str = typer.Argument(..., help="GitHub repository (e.g., 'anthropics/skills')"),
+    skill_name: str = typer.Option(None, "--name", "-n", help="Specific skill name to install (optional)"),
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing skills"),
+):
+    """Install skills from a GitHub repository."""
+    import tempfile
+    import zipfile
+    import shutil
+    
+    from nanobot.config.loader import load_config
+    from nanobot.utils.helpers import get_skills_path
+    
+    # Parse repository path
+    if "/" not in repo:
+        console.print(f"[red]Error: Invalid repository format. Expected 'owner/repo'[/red]")
+        raise typer.Exit(1)
+    
+    owner, repo_name = repo.split("/", 1)
+    
+    # Get workspace skills directory
+    config = load_config()
+    skills_dir = get_skills_path(config.workspace_path)
+    
+    console.print(f"{__logo__} Installing from [cyan]{repo}[/cyan]...")
+    
+    # Download repository
+    try:
+        import httpx
+        
+        # GitHub API: get default branch
+        api_url = f"https://api.github.com/repos/{owner}/{repo_name}"
+        with httpx.Client(timeout=30.0) as client:
+            try:
+                response = client.get(api_url)
+                response.raise_for_status()
+                repo_data = response.json()
+                default_branch = repo_data.get("default_branch", "main")
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    console.print(f"[red]Error: Repository {repo} not found[/red]")
+                    raise typer.Exit(1)
+                raise
+        
+        # Download zip file
+        zip_url = f"https://github.com/{owner}/{repo_name}/archive/refs/heads/{default_branch}.zip"
+        console.print(f"  Downloading from GitHub...")
+        
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp_file:
+            with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+                response = client.get(zip_url)
+                response.raise_for_status()
+                tmp_file.write(response.content)
+                tmp_file_path = tmp_file.name
+        
+        # Extract zip
+        console.print(f"  Extracting...")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            extract_path = Path(tmp_dir)
+            with zipfile.ZipFile(tmp_file_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_path)
+            
+            # Find the extracted repository directory
+            extracted_repo = None
+            for item in extract_path.iterdir():
+                if item.is_dir() and repo_name in item.name:
+                    extracted_repo = item
+                    break
+            
+            if not extracted_repo:
+                console.print(f"[red]Error: Could not find extracted repository[/red]")
+                raise typer.Exit(1)
+            
+            # Find skills in the repository
+            # Look for directories with SKILL.md files
+            skills_found = []
+            for item in extracted_repo.rglob("SKILL.md"):
+                skill_dir = item.parent
+                skill_name_found = skill_dir.name
+                skills_found.append((skill_name_found, skill_dir))
+            
+            if not skills_found:
+                console.print(f"[yellow]Warning: No skills found in repository (no SKILL.md files)[/yellow]")
+                raise typer.Exit(1)
+            
+            # Filter by skill_name if specified
+            if skill_name:
+                skills_found = [(name, path) for name, path in skills_found if name == skill_name]
+                if not skills_found:
+                    console.print(f"[red]Error: Skill '{skill_name}' not found in repository[/red]")
+                    raise typer.Exit(1)
+            
+            # Install skills
+            installed = []
+            for skill_name_found, skill_dir in skills_found:
+                target_dir = skills_dir / skill_name_found
+                
+                if target_dir.exists() and not force:
+                    console.print(f"  [yellow]Skipping {skill_name_found} (already exists, use --force to overwrite)[/yellow]")
+                    continue
+                
+                # Copy skill directory
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
+                
+                shutil.copytree(skill_dir, target_dir)
+                installed.append(skill_name_found)
+                console.print(f"  [green]✓[/green] Installed {skill_name_found}")
+        
+        # Cleanup
+        Path(tmp_file_path).unlink()
+        
+        if installed:
+            console.print(f"\n[green]✓[/green] Successfully installed {len(installed)} skill(s): {', '.join(installed)}")
+        else:
+            console.print(f"\n[yellow]No new skills installed[/yellow]")
+            
+    except httpx.RequestError as e:
+        console.print(f"[red]Error: Network error - {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@marketplace_app.command("list")
+def marketplace_list():
+    """List installed skills from workspace."""
+    from nanobot.config.loader import load_config
+    from nanobot.agent.skills import SkillsLoader
+    
+    config = load_config()
+    skills_loader = SkillsLoader(config.workspace_path)
+    
+    # Get all skills (including unavailable)
+    all_skills = skills_loader.list_skills(filter_unavailable=False)
+    # Get available skills to check availability
+    available_skills = {s["name"] for s in skills_loader.list_skills(filter_unavailable=True)}
+    
+    if not all_skills:
+        console.print("No skills installed.")
+        return
+    
+    table = Table(title="Installed Skills")
+    table.add_column("Name", style="cyan")
+    table.add_column("Source", style="green")
+    table.add_column("Available", style="yellow")
+    table.add_column("Description")
+    
+    for skill in all_skills:
+        meta = skills_loader.get_skill_metadata(skill["name"])
+        desc = meta.get("description", "") if meta else ""
+        if len(desc) > 50:
+            desc = desc[:47] + "..."
+        
+        available = "✓" if skill["name"] in available_skills else "✗"
+        source = skill["source"]
+        
+        table.add_row(skill["name"], source, available, desc)
+    
+    console.print(table)
+
+
+# ============================================================================
 # Status Commands
 # ============================================================================
 

@@ -15,3 +15,5 @@ docs/
 *.pyzz
 lite/
 .venv/
+examples/
+.nanobot/

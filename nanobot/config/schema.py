@@ -30,11 +30,20 @@ class FeishuConfig(BaseModel):
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
 
 
+class WebSocketConfig(BaseModel):
+    """WebSocket channel configuration."""
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 18790
+    allow_from: list[str] = Field(default_factory=list)  # Allowed client IDs (empty = allow all)
+
+
 class ChannelsConfig(BaseModel):
     """Configuration for chat channels."""
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+    websocket: WebSocketConfig = Field(default_factory=WebSocketConfig)
 
 
 class AgentDefaults(BaseModel):
@@ -64,6 +73,7 @@ class ProvidersConfig(BaseModel):
     openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
     groq: ProviderConfig = Field(default_factory=ProviderConfig)
     zhipu: ProviderConfig = Field(default_factory=ProviderConfig)
+    dashscope: ProviderConfig = Field(default_factory=ProviderConfig)
     vllm: ProviderConfig = Field(default_factory=ProviderConfig)
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
     ollama: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -112,13 +122,14 @@ class Config(BaseSettings):
         return Path(self.agents.defaults.workspace).expanduser()
     
     def get_api_key(self) -> str | None:
-        """Get API key in priority order: OpenRouter > Anthropic > OpenAI > Gemini > Zhipu > Groq > Ollama > vLLM."""
+        """Get API key in priority order: OpenRouter > Anthropic > OpenAI > Gemini > Zhipu > DashScope > Groq > Ollama > vLLM."""
         return (
             self.providers.openrouter.api_key or
             self.providers.anthropic.api_key or
             self.providers.openai.api_key or
             self.providers.gemini.api_key or
             self.providers.zhipu.api_key or
+            self.providers.dashscope.api_key or
             self.providers.groq.api_key or
             self.providers.ollama.api_key or
             self.providers.vllm.api_key or
@@ -126,11 +137,13 @@ class Config(BaseSettings):
         )
     
     def get_api_base(self) -> str | None:
-        """Get API base URL if using OpenRouter, Zhipu, Ollama or vLLM."""
+        """Get API base URL if using OpenRouter, Zhipu, DashScope, Ollama or vLLM."""
         if self.providers.openrouter.api_key:
             return self.providers.openrouter.api_base or "https://openrouter.ai/api/v1"
         if self.providers.zhipu.api_key:
             return self.providers.zhipu.api_base
+        if self.providers.dashscope.api_key:
+            return self.providers.dashscope.api_base or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         if self.providers.ollama.api_base:
             return self.providers.ollama.api_base
         if self.providers.vllm.api_base:
