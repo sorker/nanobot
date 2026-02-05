@@ -789,6 +789,7 @@ def marketplace_list():
     table.add_column("Source", style="green")
     table.add_column("Available", style="yellow")
     table.add_column("Description")
+    table.add_column("Missing Requirements", style="red")
     
     for skill in all_skills:
         meta = skills_loader.get_skill_metadata(skill["name"])
@@ -799,9 +800,72 @@ def marketplace_list():
         available = "✓" if skill["name"] in available_skills else "✗"
         source = skill["source"]
         
-        table.add_row(skill["name"], source, available, desc)
+        # Get missing requirements for unavailable skills
+        missing = ""
+        if skill["name"] not in available_skills:
+            skill_meta = skills_loader._get_skill_meta(skill["name"])
+            missing = skills_loader._get_missing_requirements(skill_meta)
+            if missing and len(missing) > 40:
+                missing = missing[:37] + "..."
+        
+        table.add_row(skill["name"], source, available, desc, missing)
     
     console.print(table)
+
+
+@marketplace_app.command("remove")
+def marketplace_remove(
+    skill_name: str = typer.Argument(..., help="Skill name to remove"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt"),
+):
+    """Remove a skill from workspace."""
+    import shutil
+    from nanobot.config.loader import load_config
+    from nanobot.utils.helpers import get_skills_path
+    from nanobot.agent.skills import SkillsLoader
+    
+    config = load_config()
+    skills_dir = get_skills_path(config.workspace_path)
+    skills_loader = SkillsLoader(config.workspace_path)
+    
+    # Check if skill exists in workspace
+    skill_path = skills_dir / skill_name
+    if not skill_path.exists():
+        # Check if it's a builtin skill
+        all_skills = skills_loader.list_skills(filter_unavailable=False)
+        skill_info = next((s for s in all_skills if s["name"] == skill_name), None)
+        
+        if skill_info:
+            if skill_info["source"] == "builtin":
+                console.print(f"[yellow]Warning: '{skill_name}' is a built-in skill and cannot be removed.[/yellow]")
+                console.print("Built-in skills are part of nanobot and cannot be uninstalled.")
+                raise typer.Exit(1)
+            else:
+                console.print(f"[red]Error: Skill '{skill_name}' not found in workspace.[/red]")
+                raise typer.Exit(1)
+        else:
+            console.print(f"[red]Error: Skill '{skill_name}' not found.[/red]")
+            raise typer.Exit(1)
+    
+    # Confirm deletion
+    if not force:
+        meta = skills_loader.get_skill_metadata(skill_name)
+        desc = meta.get("description", "") if meta else "No description"
+        console.print(f"\nSkill: [cyan]{skill_name}[/cyan]")
+        console.print(f"Description: {desc}")
+        console.print(f"Location: {skill_path}")
+        
+        if not typer.confirm(f"\nAre you sure you want to remove '{skill_name}'?"):
+            console.print("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+    
+    # Remove the skill directory
+    try:
+        shutil.rmtree(skill_path)
+        console.print(f"[green]✓[/green] Removed skill '{skill_name}'")
+    except Exception as e:
+        console.print(f"[red]Error: Failed to remove skill - {e}[/red]")
+        raise typer.Exit(1)
 
 
 # ============================================================================

@@ -200,6 +200,19 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments)
                     logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
+                    
+                    # Send tool execution event to client
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"正在执行工具: {tool_call.name}",
+                        metadata={
+                            "type": "tool",
+                            "tool_name": tool_call.name,
+                            "arguments": tool_call.arguments
+                        }
+                    ))
+                    
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
@@ -293,6 +306,19 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments)
                     logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
+                    
+                    # Send tool execution event to client
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=origin_channel,
+                        chat_id=origin_chat_id,
+                        content=f"正在执行工具: {tool_call.name}",
+                        metadata={
+                            "type": "tool",
+                            "tool_name": tool_call.name,
+                            "arguments": tool_call.arguments
+                        }
+                    ))
+                    
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result

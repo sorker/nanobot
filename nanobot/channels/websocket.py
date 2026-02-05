@@ -99,16 +99,26 @@ class WebSocketChannel(BaseChannel):
         ws = self._clients[client_id]
         
         try:
-            # Send message to client
+            # Determine message type from metadata
+            msg_type = msg.metadata.get("type", "message") if msg.metadata else "message"
+            
+            # Build response based on type
             response = {
-                "type": "message",
+                "type": msg_type,
                 "content": msg.content,
                 "chat_id": msg.chat_id,
                 "timestamp": asyncio.get_event_loop().time()
             }
             
+            # Add extra fields based on message type
+            if msg_type == "tool" and msg.metadata:
+                response["tool"] = msg.metadata.get("tool_name", "unknown")
+                response["arguments"] = msg.metadata.get("arguments", {})
+            elif msg_type == "event" and msg.metadata:
+                response["event"] = msg.metadata.get("event_type", "unknown")
+            
             await ws.send(json.dumps(response, ensure_ascii=False))
-            logger.debug(f"Sent message to client {client_id}: {msg.content[:50]}...")
+            logger.debug(f"Sent {msg_type} to client {client_id}: {msg.content[:50]}...")
             
         except Exception as e:
             logger.error(f"Error sending message to client {client_id}: {e}")
