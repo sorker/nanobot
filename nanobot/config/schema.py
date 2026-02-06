@@ -30,20 +30,11 @@ class FeishuConfig(BaseModel):
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
 
 
-class WebSocketConfig(BaseModel):
-    """WebSocket channel configuration."""
-    enabled: bool = False
-    host: str = "0.0.0.0"
-    port: int = 18790
-    allow_from: list[str] = Field(default_factory=list)  # Allowed client IDs (empty = allow all)
-
-
 class ChannelsConfig(BaseModel):
     """Configuration for chat channels."""
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
-    websocket: WebSocketConfig = Field(default_factory=WebSocketConfig)
 
 
 class AgentDefaults(BaseModel):

@@ -285,6 +285,75 @@ def gateway(
 
 
 # ============================================================================
+# SSE Server
+# ============================================================================
+
+
+@app.command()
+def sse(
+    port: int = typer.Option(18790, "--port", "-p", help="SSE server port"),
+    host: str = typer.Option("0.0.0.0", "--host", help="SSE server host"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """Start the SSE unified Agent server."""
+    from nanobot.config.loader import load_config
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.litellm_provider import LiteLLMProvider
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.sse.handler import SSEHandler
+    from nanobot.sse.app import create_app
+
+    if verbose:
+        import logging
+        logging.basicConfig(level=logging.DEBUG)
+
+    console.print(f"{__logo__} Starting nanobot SSE server on {host}:{port}...")
+
+    config = load_config()
+
+    # Validate API key
+    api_key = config.get_api_key()
+    api_base = config.get_api_base()
+    model = config.agents.defaults.model
+    is_bedrock = model.startswith("bedrock/")
+    is_ollama = (
+        model.startswith("ollama/")
+        or (api_base and ("ollama" in api_base.lower() or ":11434" in api_base))
+    )
+
+    if not api_key and not is_bedrock and not is_ollama:
+        console.print("[red]Error: No API key configured.[/red]")
+        console.print("Set one in ~/.nanobot/config.json under one of the providers.")
+        raise typer.Exit(1)
+
+    # Build components
+    bus = MessageBus()
+    provider = LiteLLMProvider(
+        api_key=api_key,
+        api_base=api_base,
+        default_model=model,
+    )
+    agent = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=config.workspace_path,
+        model=model,
+        max_iterations=config.agents.defaults.max_tool_iterations,
+        brave_api_key=config.tools.web.search.api_key or None,
+        exec_config=config.tools.exec,
+    )
+    handler = SSEHandler(agent)
+    fastapi_app = create_app(handler)
+
+    console.print(f"[green]✓[/green] Model: {model}")
+    console.print(f"[green]✓[/green] Endpoint: POST http://{host}:{port}/v1/chat/completions")
+    console.print(f"[green]✓[/green] Health: GET  http://{host}:{port}/health")
+
+    import uvicorn
+    uvicorn.run(fastapi_app, host=host, port=port, log_level="info")
+
+
+# ============================================================================
 # Agent Commands
 # ============================================================================
 

@@ -47,7 +47,7 @@ class MessageTool(Tool):
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Optional: target channel (telegram, whatsapp, websocket, etc.)"
+                    "description": "Optional: target channel (telegram, whatsapp, feishu, etc.)"
                 },
                 "chat_id": {
                     "type": "string",

@@ -66,20 +66,6 @@ class ChannelManager:
                 logger.info("Feishu channel enabled")
             except ImportError as e:
                 logger.warning(f"Feishu channel not available: {e}")
-        # WebSocket channel
-        if self.config.channels.websocket.enabled:
-            try:
-                from nanobot.channels.websocket import WebSocketChannel
-                # Use gateway host/port for WebSocket if not explicitly set
-                ws_config = self.config.channels.websocket.model_copy()
-                ws_config.host = self.config.gateway.host
-                ws_config.port = self.config.gateway.port
-                self.channels["websocket"] = WebSocketChannel(
-                    ws_config, self.bus
-                )
-                logger.info(f"WebSocket channel enabled on {ws_config.host}:{ws_config.port}")
-            except ImportError as e:
-                logger.warning(f"WebSocket channel not available: {e}")
     
     async def start_all(self) -> None:
         """Start WhatsApp channel and the outbound dispatcher."""

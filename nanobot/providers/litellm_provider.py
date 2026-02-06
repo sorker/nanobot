@@ -1,13 +1,14 @@
 """LiteLLM provider implementation for multi-provider support."""
 
+import json
 import os
-from typing import Any
+from typing import Any, AsyncIterator
 
 import litellm
 from litellm import acompletion
 from loguru import logger
 
-from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.providers.base import LLMProvider, LLMResponse, StreamDelta, ToolCallRequest
 
 
 class LiteLLMProvider(LLMProvider):
@@ -166,6 +167,132 @@ class LiteLLMProvider(LLMProvider):
             usage=usage,
         )
     
+    # ------------------------------------------------------------------
+    # Streaming
+    # ------------------------------------------------------------------
+
+    def _prepare_model(self, model: str | None) -> str:
+        """Apply provider-specific model name transformations."""
+        model = model or self.default_model
+
+        # Zhipu / Z.ai prefix
+        if ("glm" in model.lower() or "zhipu" in model.lower()) and not (
+            model.startswith("zhipu/")
+            or model.startswith("zai/")
+            or model.startswith("openrouter/")
+            or model.startswith("ollama/")
+        ):
+            model = f"zai/{model}"
+
+        # vLLM prefix
+        if "vllm" in model.lower():
+            model = f"hosted_vllm/{model}"
+
+        # Gemini prefix
+        if "gemini" in model.lower() and not model.startswith("gemini/"):
+            model = f"gemini/{model}"
+
+        return model
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        enable_thinking: bool = False,
+    ) -> AsyncIterator[StreamDelta]:
+        """
+        Send a *streaming* chat completion request via LiteLLM.
+
+        Yields :class:`StreamDelta` objects that the caller can
+        convert to SSE events.
+        """
+        model = self._prepare_model(model)
+
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+
+        if self.api_base:
+            kwargs["api_base"] = self.api_base
+
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        # Extended thinking support (Claude 3.5+ with thinking)
+        if enable_thinking:
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": min(max_tokens, 10000)}
+
+        try:
+            response = await acompletion(**kwargs)
+
+            async for chunk in response:
+                delta = self._parse_stream_chunk(chunk)
+                if delta is not None:
+                    yield delta
+
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+            yield StreamDelta(content_delta=f"Error calling LLM: {str(e)}")
+            yield StreamDelta(finish_reason="error")
+
+    def _parse_stream_chunk(self, chunk: Any) -> StreamDelta | None:
+        """Parse a single streaming chunk into a :class:`StreamDelta`."""
+        try:
+            choice = chunk.choices[0] if chunk.choices else None
+            if choice is None:
+                return None
+
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                return None
+
+            # --- thinking / reasoning content ---
+            # Some providers expose thinking as `reasoning_content`
+            thinking = getattr(delta, "reasoning_content", None)
+            if thinking:
+                return StreamDelta(thinking_delta=thinking)
+
+            # --- text content ---
+            content = getattr(delta, "content", None)
+            if content:
+                return StreamDelta(content_delta=content)
+
+            # --- tool calls ---
+            tool_calls = getattr(delta, "tool_calls", None)
+            if tool_calls:
+                tc = tool_calls[0]
+                func = getattr(tc, "function", None)
+                return StreamDelta(
+                    tool_call_index=getattr(tc, "index", 0),
+                    tool_call_id=getattr(tc, "id", None),
+                    tool_call_name=getattr(func, "name", None) if func else None,
+                    tool_call_arguments_delta=getattr(func, "arguments", None) if func else None,
+                )
+
+            # --- finish reason ---
+            finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason:
+                usage = {}
+                if hasattr(chunk, "usage") and chunk.usage:
+                    usage = {
+                        "prompt_tokens": chunk.usage.prompt_tokens or 0,
+                        "completion_tokens": chunk.usage.completion_tokens or 0,
+                        "total_tokens": chunk.usage.total_tokens or 0,
+                    }
+                return StreamDelta(finish_reason=finish_reason, usage=usage)
+
+            return None
+        except Exception:
+            return None
+
     def get_default_model(self) -> str:
         """Get the default model."""
         return self.default_model
