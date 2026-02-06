@@ -94,10 +94,24 @@ class ExecToolConfig(BaseModel):
     restrict_to_workspace: bool = False  # If true, block commands accessing paths outside workspace
 
 
+class OSSConfig(BaseModel):
+    """Alibaba Cloud OSS configuration."""
+    access_key_id: str = ""
+    access_key_secret: str = ""
+    bucket_name: str = ""
+    endpoint: str = "oss-cn-shanghai.aliyuncs.com"
+    domain: str = ""
+    region: str = "cn-shanghai"
+    use_internal: bool | None = None  # None = auto-detect from endpoint
+    connect_timeout: int = 30
+    readwrite_timeout: int = 60
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    oss: OSSConfig = Field(default_factory=OSSConfig)
 
 
 class Config(BaseSettings):

@@ -29,7 +29,9 @@ class ContextBuilder:
         Build the system prompt from bootstrap files, memory, and skills.
         
         Args:
-            skill_names: Optional list of skills to include.
+            skill_names: Optional list of skill names to include.
+                         *None* → load all skills (default behaviour).
+                         An explicit list → only load / show those skills.
         
         Returns:
             Complete system prompt.
@@ -50,15 +52,25 @@ class ContextBuilder:
             parts.append(f"# Memory\n\n{memory}")
         
         # Skills - progressive loading
+        # Determine the allowed skill set
+        allowed_set: set[str] | None = set(skill_names) if skill_names is not None else None
+
         # 1. Always-loaded skills: include full content
+        #    When a skill_names filter is active, only include always-skills
+        #    that are also in the allowed set.
         always_skills = self.skills.get_always_skills()
+        if allowed_set is not None:
+            always_skills = [s for s in always_skills if s in allowed_set]
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
                 parts.append(f"# Active Skills\n\n{always_content}")
         
         # 2. Available skills: only show summary (agent uses read_file to load)
-        skills_summary = self.skills.build_skills_summary()
+        #    When a skill_names filter is active, build a filtered summary.
+        skills_summary = self.skills.build_skills_summary(
+            filter_names=skill_names
+        )
         if skills_summary:
             parts.append(f"""# Skills
 

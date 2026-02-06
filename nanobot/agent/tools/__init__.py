@@ -16,6 +16,7 @@ from nanobot.agent.tools.find import FindTool
 from nanobot.agent.tools.grep import GrepTool
 from nanobot.agent.tools.weather import WeatherTool
 from nanobot.agent.tools.process import ProcessTool
+from nanobot.agent.tools.oss import OSSUploadFileTool, OSSUploadTextTool
 
 __all__ = [
     "Tool",
@@ -38,4 +39,7 @@ __all__ = [
     "SpawnTool",
     # System tools
     "ProcessTool",
+    # OSS tools
+    "OSSUploadFileTool",
+    "OSSUploadTextTool",
 ]

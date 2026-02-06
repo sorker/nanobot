@@ -98,17 +98,24 @@ class SkillsLoader:
         
         return "\n\n---\n\n".join(parts) if parts else ""
     
-    def build_skills_summary(self) -> str:
+    def build_skills_summary(self, filter_names: list[str] | None = None) -> str:
         """
-        Build a summary of all skills (name, description, path, availability).
+        Build a summary of skills (name, description, path, availability).
         
         This is used for progressive loading - the agent can read the full
         skill content using read_file when needed.
+        
+        Args:
+            filter_names: Optional list of skill names to include.
+                          *None* → include all skills (default).
         
         Returns:
             XML-formatted skills summary.
         """
         all_skills = self.list_skills(filter_unavailable=False)
+        if filter_names is not None:
+            allowed = set(filter_names)
+            all_skills = [s for s in all_skills if s["name"] in allowed]
         if not all_skills:
             return ""
         
@@ -190,6 +197,14 @@ class SkillsLoader:
         meta = self.get_skill_metadata(name) or {}
         return self._parse_nanobot_metadata(meta.get("metadata", ""))
     
+    def get_all_skill_names(self) -> list[str]:
+        """Return the names of all available skills (requirements met).
+
+        This is used by the pattern matcher in the agent loop to resolve
+        glob patterns like ``["weather", "web_*"]`` against real skill names.
+        """
+        return [s["name"] for s in self.list_skills(filter_unavailable=True)]
+
     def get_always_skills(self) -> list[str]:
         """Get skills marked as always=true that meet requirements."""
         result = []

@@ -82,6 +82,7 @@ def create_app(
             max_iterations=config.agents.defaults.max_tool_iterations,
             brave_api_key=config.tools.web.search.api_key or None,
             exec_config=config.tools.exec,
+            oss_config=config.tools.oss,
         )
         app.state.sse_handler = SSEHandler(agent)
         logger.info("SSE handler built from config")

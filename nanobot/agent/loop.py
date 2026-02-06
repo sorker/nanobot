@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator
@@ -19,11 +20,12 @@ from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
+from nanobot.agent.tools.oss import OSSUploadFileTool, OSSUploadTextTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ExecToolConfig
+    from nanobot.config.schema import ExecToolConfig, OSSConfig
     from nanobot.sse.context import RequestContext
     from nanobot.sse.emitter import SSEEmitter
 
@@ -49,6 +51,7 @@ class AgentLoop:
         max_iterations: int = 20,
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
+        oss_config: "OSSConfig | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -58,6 +61,7 @@ class AgentLoop:
         self.max_iterations = max_iterations
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
+        self.oss_config = oss_config
         
         self.context = ContextBuilder(workspace)
         self.sessions = SessionManager(workspace)
@@ -100,6 +104,13 @@ class AgentLoop:
         # Spawn tool (for subagents)
         spawn_tool = SpawnTool(manager=self.subagents)
         self.tools.register(spawn_tool)
+        
+        # OSS tools
+        from nanobot.utils.oss_service import OSSService
+        oss_service = OSSService(self.oss_config)
+        if oss_service.is_enabled():
+            self.tools.register(OSSUploadFileTool(oss_service))
+            self.tools.register(OSSUploadTextTool(oss_service))
     
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -400,19 +411,29 @@ class AgentLoop:
             # 1. Get or create session
             session = self.sessions.get_or_create(ctx.session_key)
 
-            # 2. Build tool registry with optional filtering
+            # 2. Build tool registry with optional filtering (supports glob patterns)
             tools_defs = self._get_filtered_tool_definitions(ctx.tool_list)
 
-            # 3. Build messages (system prompt + history + current)
+            # 3. Resolve skill patterns against available skills
+            resolved_skills: list[str] | None = None
+            if ctx.skill_list and ctx.skill_list != ["*"]:
+                all_skill_names = self.context.skills.get_all_skill_names()
+                resolved_skills = self._match_patterns(all_skill_names, ctx.skill_list)
+                logger.debug(
+                    f"Skill pattern matching: patterns={ctx.skill_list} "
+                    f"→ resolved={resolved_skills}"
+                )
+
+            # 4. Build messages (system prompt + history + current)
             current_text, current_media = self._extract_last_user_message(openai_messages)
             messages = self.context.build_messages(
                 history=session.get_history(),
                 current_message=current_text,
-                skill_names=ctx.skill_list if ctx.skill_list != ["*"] else None,
+                skill_names=resolved_skills,
                 media=current_media,
             )
 
-            # 4. Agent loop
+            # 5. Agent loop
             if ctx.stream:
                 async for event in self._sse_stream_loop(
                     ctx, emitter, messages, tools_defs, session
@@ -424,7 +445,7 @@ class AgentLoop:
                 ):
                     yield event
 
-            # 5. Done
+            # 6. Done
             yield emitter.emit_done()
 
         except Exception as e:
@@ -516,7 +537,8 @@ class AgentLoop:
                     messages, full_content, tool_call_dicts
                 )
 
-                # Execute each tool
+                # Execute each tool (all tool events in this ReAct cycle
+                # share the same turn_msg_id)
                 for tc_dict in tool_call_dicts:
                     tc_id = tc_dict["id"]
                     tc_name = tc_dict["function"]["name"]
@@ -527,14 +549,14 @@ class AgentLoop:
                     except json.JSONDecodeError:
                         tc_args = {}
 
-                    # Emit tool call event
-                    yield emitter.emit_tool_call(tc_name, tc_args, ctx.new_message_id())
+                    # Emit tool call event (same turn_msg_id)
+                    yield emitter.emit_tool_call(tc_name, tc_args, turn_msg_id)
 
                     # Execute
                     result = await self.tools.execute(tc_name, tc_args)
 
-                    # Emit tool result event
-                    yield emitter.emit_tool_result(tc_name, result, ctx.current_message_id)
+                    # Emit tool result event (same turn_msg_id)
+                    yield emitter.emit_tool_result(tc_name, result, turn_msg_id)
 
                     # Add tool result to messages
                     messages = self.context.add_tool_result(
@@ -601,17 +623,17 @@ class AgentLoop:
                     messages, response.content, tool_call_dicts
                 )
 
-                # Execute each tool
+                # Execute each tool (all tool events in this ReAct cycle
+                # share the same turn_msg_id)
                 for tool_call in response.tool_calls:
-                    tool_msg_id = ctx.new_message_id()
                     yield emitter.emit_tool_call(
-                        tool_call.name, tool_call.arguments, tool_msg_id
+                        tool_call.name, tool_call.arguments, turn_msg_id
                     )
 
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
 
                     yield emitter.emit_tool_result(
-                        tool_call.name, result, tool_msg_id
+                        tool_call.name, result, turn_msg_id
                     )
 
                     messages = self.context.add_tool_result(
@@ -641,15 +663,60 @@ class AgentLoop:
     # Helpers
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Pattern matching helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _match_patterns(names: list[str], patterns: list[str]) -> list[str]:
+        """Filter *names* using glob-style *patterns*.
+
+        Supported patterns (via :func:`fnmatch.fnmatch`):
+        - ``"*"``       → match everything
+        - ``"exec"``    → exact match
+        - ``"read_*"``  → prefix wildcard
+        - ``"*file*"``  → contains wildcard
+        - ``"web_??"``  → single-char wildcard
+
+        Args:
+            names: All available names (tools / skills).
+            patterns: List of glob patterns provided by the caller.
+
+        Returns:
+            De-duplicated list of matched names, preserving the order
+            in which they first appeared in *names*.
+        """
+        if not patterns or patterns == ["*"]:
+            return list(names)
+
+        matched: list[str] = []
+        seen: set[str] = set()
+        for name in names:
+            for pat in patterns:
+                if fnmatch.fnmatch(name, pat):
+                    if name not in seen:
+                        matched.append(name)
+                        seen.add(name)
+                    break
+        return matched
+
     def _get_filtered_tool_definitions(
         self, tool_list: list[str]
     ) -> list[dict[str, Any]] | None:
-        """Return tool definitions, optionally filtered by *tool_list*."""
+        """Return tool definitions, optionally filtered by *tool_list*.
+
+        Supports glob-style patterns in *tool_list*:
+        - ``["*"]``                → all tools (default)
+        - ``["exec", "read_*"]``   → exact + wildcard
+        - ``["*file*"]``           → any tool containing "file"
+        """
         all_defs = self.tools.get_definitions()
         if not tool_list or tool_list == ["*"]:
             return all_defs if all_defs else None
 
-        allowed = set(tool_list)
+        all_names = [d.get("function", {}).get("name", "") for d in all_defs]
+        allowed = set(self._match_patterns(all_names, tool_list))
+
         filtered = [d for d in all_defs if d.get("function", {}).get("name") in allowed]
         return filtered if filtered else None
 
