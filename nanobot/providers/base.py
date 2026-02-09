@@ -20,7 +20,7 @@ class LLMResponse:
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
-    thinking: str | None = None  # Extended thinking / reasoning content
+    reasoning_content: str | None = None  # Kimi, DeepSeek-R1 etc.
     
     @property
     def has_tool_calls(self) -> bool:
@@ -113,8 +113,8 @@ class LLMProvider(ABC):
             StreamDelta chunks.
         """
         response = await self.chat(messages, tools, model, max_tokens, temperature)
-        if response.thinking:
-            yield StreamDelta(thinking_delta=response.thinking)
+        if response.reasoning_content:
+            yield StreamDelta(thinking_delta=response.reasoning_content)
         if response.content:
             yield StreamDelta(content_delta=response.content)
         for tc in response.tool_calls:

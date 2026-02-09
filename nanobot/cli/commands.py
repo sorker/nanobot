@@ -1,7 +1,12 @@
 """CLI commands for nanobot."""
 
 import asyncio
+import atexit
+import os
+import signal
 from pathlib import Path
+import select
+import sys
 
 import typer
 from rich.console import Console
@@ -16,6 +21,123 @@ app = typer.Typer(
 )
 
 console = Console()
+
+# ---------------------------------------------------------------------------
+# Lightweight CLI input: readline for arrow keys / history, termios for flush
+# ---------------------------------------------------------------------------
+
+_READLINE = None
+_HISTORY_FILE: Path | None = None
+_HISTORY_HOOK_REGISTERED = False
+_USING_LIBEDIT = False
+_SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
+
+
+def _flush_pending_tty_input() -> None:
+    """Drop unread keypresses typed while the model was generating output."""
+    try:
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd):
+            return
+    except Exception:
+        return
+
+    try:
+        import termios
+        termios.tcflush(fd, termios.TCIFLUSH)
+        return
+    except Exception:
+        pass
+
+    try:
+        while True:
+            ready, _, _ = select.select([fd], [], [], 0)
+            if not ready:
+                break
+            if not os.read(fd, 4096):
+                break
+    except Exception:
+        return
+
+
+def _save_history() -> None:
+    if _READLINE is None or _HISTORY_FILE is None:
+        return
+    try:
+        _READLINE.write_history_file(str(_HISTORY_FILE))
+    except Exception:
+        return
+
+
+def _restore_terminal() -> None:
+    """Restore terminal to its original state (echo, line buffering, etc.)."""
+    if _SAVED_TERM_ATTRS is None:
+        return
+    try:
+        import termios
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _SAVED_TERM_ATTRS)
+    except Exception:
+        pass
+
+
+def _enable_line_editing() -> None:
+    """Enable readline for arrow keys, line editing, and persistent history."""
+    global _READLINE, _HISTORY_FILE, _HISTORY_HOOK_REGISTERED, _USING_LIBEDIT, _SAVED_TERM_ATTRS
+
+    # Save terminal state before readline touches it
+    try:
+        import termios
+        _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        pass
+
+    history_file = Path.home() / ".nanobot" / "history" / "cli_history"
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    _HISTORY_FILE = history_file
+
+    try:
+        import readline
+    except ImportError:
+        return
+
+    _READLINE = readline
+    _USING_LIBEDIT = "libedit" in (readline.__doc__ or "").lower()
+
+    try:
+        if _USING_LIBEDIT:
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+        readline.parse_and_bind("set editing-mode emacs")
+    except Exception:
+        pass
+
+    try:
+        readline.read_history_file(str(history_file))
+    except Exception:
+        pass
+
+    if not _HISTORY_HOOK_REGISTERED:
+        atexit.register(_save_history)
+        _HISTORY_HOOK_REGISTERED = True
+
+
+def _prompt_text() -> str:
+    """Build a readline-friendly colored prompt."""
+    if _READLINE is None:
+        return "You: "
+    # libedit on macOS does not honor GNU readline non-printing markers.
+    if _USING_LIBEDIT:
+        return "\033[1;34mYou:\033[0m "
+    return "\001\033[1;34m\002You:\001\033[0m\002 "
+
+
+async def _read_interactive_input_async() -> str:
+    """Read user input with arrow keys and history (runs input() in a thread)."""
+    try:
+        return await asyncio.to_thread(input, _prompt_text())
+    except EOFError as exc:
+        raise KeyboardInterrupt from exc
 
 
 def version_callback(value: bool):
@@ -147,6 +269,24 @@ This file stores important information that should persist across sessions.
         console.print("  [dim]Created memory/MEMORY.md[/dim]")
 
 
+def _make_provider(config):
+    """Create LiteLLMProvider from config. Exits if no API key found."""
+    from nanobot.providers.litellm_provider import LiteLLMProvider
+    p = config.get_provider()
+    model = config.agents.defaults.model
+    if not (p and p.api_key) and not model.startswith("bedrock/"):
+        console.print("[red]Error: No API key configured.[/red]")
+        console.print("Set one in ~/.nanobot/config.json under providers section")
+        raise typer.Exit(1)
+    return LiteLLMProvider(
+        api_key=p.api_key if p else None,
+        api_base=config.get_api_base(),
+        default_model=model,
+        extra_headers=p.extra_headers if p else None,
+        provider_name=config.get_provider_name(),
+    )
+
+
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -160,9 +300,9 @@ def gateway(
     """Start the nanobot gateway."""
     from nanobot.config.loader import load_config, get_data_dir
     from nanobot.bus.queue import MessageBus
-    from nanobot.providers.litellm_provider import LiteLLMProvider
     from nanobot.agent.loop import AgentLoop
     from nanobot.channels.manager import ChannelManager
+    from nanobot.session.manager import SessionManager
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
@@ -174,40 +314,15 @@ def gateway(
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
     
     config = load_config()
-    
-    # Create components
     bus = MessageBus()
+    provider = _make_provider(config)
+    session_manager = SessionManager(config.workspace_path)
     
-    # Create provider (supports OpenRouter, Anthropic, OpenAI, Bedrock, Ollama, etc.)
-    api_key = config.get_api_key()
-    api_base = config.get_api_base()
-    model = config.agents.defaults.model
-    is_bedrock = model.startswith("bedrock/")
-    is_ollama = (
-        model.startswith("ollama/") or 
-        (api_base and ("ollama" in api_base.lower() or ":11434" in api_base))
-    )
-
-    if not api_key and not is_bedrock and not is_ollama:
-        console.print("[red]Error: No API key configured.[/red]")
-        console.print("Set one in ~/.nanobot/config.json under one of the providers:")
-        console.print("  - providers.openrouter.apiKey (for OpenRouter)")
-        console.print("  - providers.anthropic.apiKey (for Anthropic Claude)")
-        console.print("  - providers.openai.apiKey (for OpenAI)")
-        console.print("  - providers.ollama.apiBase (for local Ollama, e.g., http://localhost:11434)")
-        console.print("  - providers.gemini.apiKey (for Google Gemini)")
-        console.print("  - providers.zhipu.apiKey (for Zhipu AI)")
-        console.print("  - providers.dashscope.apiKey (for Alibaba DashScope/Qwen)")
-        console.print("  - providers.groq.apiKey (for Groq)")
-        raise typer.Exit(1)
+    # Create cron service first (callback set after agent creation)
+    cron_store_path = get_data_dir() / "cron" / "jobs.json"
+    cron = CronService(cron_store_path)
     
-    provider = LiteLLMProvider(
-        api_key=api_key,
-        api_base=api_base,
-        default_model=config.agents.defaults.model
-    )
-    
-    # Create agent
+    # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -216,28 +331,29 @@ def gateway(
         max_iterations=config.agents.defaults.max_tool_iterations,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
-        oss_config=config.tools.oss,
+        cron_service=cron,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        session_manager=session_manager,
     )
     
-    # Create cron service
+    # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
         response = await agent.process_direct(
             job.payload.message,
-            session_key=f"cron:{job.id}"
+            session_key=f"cron:{job.id}",
+            channel=job.payload.channel or "cli",
+            chat_id=job.payload.to or "direct",
         )
-        # Optionally deliver to channel
         if job.payload.deliver and job.payload.to:
             from nanobot.bus.events import OutboundMessage
             await bus.publish_outbound(OutboundMessage(
-                channel=job.payload.channel or "whatsapp",
+                channel=job.payload.channel or "cli",
                 chat_id=job.payload.to,
                 content=response or ""
             ))
         return response
-    
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
-    cron = CronService(cron_store_path, on_job=on_cron_job)
+    cron.on_job = on_cron_job
     
     # Create heartbeat service
     async def on_heartbeat(prompt: str) -> str:
@@ -252,7 +368,7 @@ def gateway(
     )
     
     # Create channel manager
-    channels = ChannelManager(config, bus)
+    channels = ChannelManager(config, bus, session_manager=session_manager)
     
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
@@ -368,26 +484,12 @@ def agent(
     """Interact with the agent directly."""
     from nanobot.config.loader import load_config
     from nanobot.bus.queue import MessageBus
-    from nanobot.providers.litellm_provider import LiteLLMProvider
     from nanobot.agent.loop import AgentLoop
     
     config = load_config()
     
-    api_key = config.get_api_key()
-    api_base = config.get_api_base()
-    model = config.agents.defaults.model
-    is_bedrock = model.startswith("bedrock/")
-
-    if not api_key and not is_bedrock:
-        console.print("[red]Error: No API key configured.[/red]")
-        raise typer.Exit(1)
-
     bus = MessageBus()
-    provider = LiteLLMProvider(
-        api_key=api_key,
-        api_base=api_base,
-        default_model=config.agents.defaults.model
-    )
+    provider = _make_provider(config)
     
     agent_loop = AgentLoop(
         bus=bus,
@@ -396,6 +498,7 @@ def agent(
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         oss_config=config.tools.oss,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
     )
     
     if message:
@@ -407,18 +510,32 @@ def agent(
         asyncio.run(run_once())
     else:
         # Interactive mode
+        _enable_line_editing()
         console.print(f"{__logo__} Interactive mode (Ctrl+C to exit)\n")
+
+        # input() runs in a worker thread that can't be cancelled.
+        # Without this handler, asyncio.run() would hang waiting for it.
+        def _exit_on_sigint(signum, frame):
+            _save_history()
+            _restore_terminal()
+            console.print("\nGoodbye!")
+            os._exit(0)
+
+        signal.signal(signal.SIGINT, _exit_on_sigint)
         
         async def run_interactive():
             while True:
                 try:
-                    user_input = console.input("[bold blue]You:[/bold blue] ")
+                    _flush_pending_tty_input()
+                    user_input = await _read_interactive_input_async()
                     if not user_input.strip():
                         continue
                     
                     response = await agent_loop.process_direct(user_input, session_id)
                     console.print(f"\n{__logo__} {response}\n")
                 except KeyboardInterrupt:
+                    _save_history()
+                    _restore_terminal()
                     console.print("\nGoodbye!")
                     break
         
@@ -454,6 +571,13 @@ def channels_status():
         wa.bridge_url
     )
 
+    dc = config.channels.discord
+    table.add_row(
+        "Discord",
+        "✓" if dc.enabled else "✗",
+        dc.gateway_url
+    )
+    
     # Telegram
     tg = config.channels.telegram
     tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
@@ -960,21 +1084,24 @@ def status():
     console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
 
     if config_path.exists():
+        from nanobot.providers.registry import PROVIDERS
+
         console.print(f"Model: {config.agents.defaults.model}")
         
-        # Check API keys
-        has_openrouter = bool(config.providers.openrouter.api_key)
-        has_anthropic = bool(config.providers.anthropic.api_key)
-        has_openai = bool(config.providers.openai.api_key)
-        has_gemini = bool(config.providers.gemini.api_key)
-        has_vllm = bool(config.providers.vllm.api_base)
-        
-        console.print(f"OpenRouter API: {'[green]✓[/green]' if has_openrouter else '[dim]not set[/dim]'}")
-        console.print(f"Anthropic API: {'[green]✓[/green]' if has_anthropic else '[dim]not set[/dim]'}")
-        console.print(f"OpenAI API: {'[green]✓[/green]' if has_openai else '[dim]not set[/dim]'}")
-        console.print(f"Gemini API: {'[green]✓[/green]' if has_gemini else '[dim]not set[/dim]'}")
-        vllm_status = f"[green]✓ {config.providers.vllm.api_base}[/green]" if has_vllm else "[dim]not set[/dim]"
-        console.print(f"vLLM/Local: {vllm_status}")
+        # Check API keys from registry
+        for spec in PROVIDERS:
+            p = getattr(config.providers, spec.name, None)
+            if p is None:
+                continue
+            if spec.is_local:
+                # Local deployments show api_base instead of api_key
+                if p.api_base:
+                    console.print(f"{spec.label}: [green]✓ {p.api_base}[/green]")
+                else:
+                    console.print(f"{spec.label}: [dim]not set[/dim]")
+            else:
+                has_key = bool(p.api_key)
+                console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
 
 
 if __name__ == "__main__":
