@@ -413,10 +413,12 @@ def sse(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
     """Start the SSE unified Agent server."""
-    from nanobot.config.loader import load_config
+    from nanobot.config.loader import load_config, get_data_dir
     from nanobot.bus.queue import MessageBus
     from nanobot.providers.litellm_provider import LiteLLMProvider
     from nanobot.agent.loop import AgentLoop
+    from nanobot.session.manager import SessionManager
+    from nanobot.cron.service import CronService
     from nanobot.sse.handler import SSEHandler
     from nanobot.sse.app import create_app
 
@@ -428,42 +430,32 @@ def sse(
 
     config = load_config()
 
-    # Validate API key
-    api_key = config.get_api_key()
-    api_base = config.get_api_base()
-    model = config.agents.defaults.model
-    is_bedrock = model.startswith("bedrock/")
-    is_ollama = (
-        model.startswith("ollama/")
-        or (api_base and ("ollama" in api_base.lower() or ":11434" in api_base))
-    )
-
-    if not api_key and not is_bedrock and not is_ollama:
-        console.print("[red]Error: No API key configured.[/red]")
-        console.print("Set one in ~/.nanobot/config.json under one of the providers.")
-        raise typer.Exit(1)
+    provider = _make_provider(config)
+    session_manager = SessionManager(config.workspace_path)
+    
+    # Create cron service first (callback set after agent creation)
+    cron_store_path = get_data_dir() / "cron" / "jobs.json"
+    cron = CronService(cron_store_path)
 
     # Build components
     bus = MessageBus()
-    provider = LiteLLMProvider(
-        api_key=api_key,
-        api_base=api_base,
-        default_model=model,
-    )
+    
     agent = AgentLoop(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
-        model=model,
+        model=config.agents.defaults.model,
         max_iterations=config.agents.defaults.max_tool_iterations,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
-        oss_config=config.tools.oss,
+        cron_service=cron,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        session_manager=session_manager,
     )
     handler = SSEHandler(agent)
     fastapi_app = create_app(handler)
 
-    console.print(f"[green]✓[/green] Model: {model}")
+    console.print(f"[green]✓[/green] Model: {config.agents.defaults.model}")
     console.print(f"[green]✓[/green] Endpoint: POST http://{host}:{port}/v1/chat/completions")
     console.print(f"[green]✓[/green] Health: GET  http://{host}:{port}/health")
 

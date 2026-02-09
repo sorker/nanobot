@@ -25,6 +25,8 @@ from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
 from nanobot.utils.oss_service import OSSService
+from nanobot.cron.service import CronService
+
 if TYPE_CHECKING:
     from nanobot.config.schema import ExecToolConfig, OSSConfig
     from nanobot.sse.context import RequestContext
@@ -58,7 +60,6 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
-        from nanobot.cron.service import CronService
         self.bus = bus
         self.provider = provider
         self.workspace = workspace

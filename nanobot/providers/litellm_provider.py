@@ -255,9 +255,21 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        # Extended thinking support (Claude 3.5+ with thinking)
+        # Extended thinking support: provider-specific parameters
         if enable_thinking:
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": min(max_tokens, 10000)}
+            if model.startswith("dashscope/"):
+                # DashScope (通义): enable_thinking + thinking_budget
+                # Pass via extra_body (OpenAI-compatible endpoint) and as kwargs (LiteLLM forwards to body)
+                budget = min(max_tokens, 10000)
+                kwargs["extra_body"] = {
+                    "enable_thinking": True,
+                    "thinking_budget": budget,
+                }
+                kwargs["enable_thinking"] = True
+                kwargs["thinking_budget"] = budget
+            else:
+                # Anthropic Claude 3.5+ etc.: thinking block
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": min(max_tokens, 10000)}
 
         try:
             response = await acompletion(**kwargs)
