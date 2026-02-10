@@ -22,3 +22,6 @@ poetry.lock
 .pytest_cache/
 tests/
 botpy.log
+edu_doc.py
+edu_svg.py
+nanobot/agent/tools/resources/templates/
