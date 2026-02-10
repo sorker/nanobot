@@ -10,7 +10,22 @@ class Tool(ABC):
     
     Tools are capabilities that the agent can use to interact with
     the environment, such as reading files, executing commands, etc.
+    
+    Auto-registration
+    -----------------
+    如果一个 Tool 子类设置了类属性 ``AUTO_REGISTER_DEPS``，它就会被
+    ``ToolRegistry.auto_register_all(deps)`` 自动发现并实例化。
+
+    ``AUTO_REGISTER_DEPS`` 是一个 ``dict[str, str]``，
+    key = 构造函数参数名，value = deps 字典中的键名。
+    示例::
+
+        class EduSVGTool(Tool):
+            AUTO_REGISTER_DEPS = {"provider": "provider", "oss_service": "oss_service"}
     """
+
+    # 子类可覆盖此属性以启用自动注册；为 None 时不参与自动注册
+    AUTO_REGISTER_DEPS: dict[str, str] | None = None
     
     _TYPE_MAP = {
         "string": str,

@@ -252,8 +252,20 @@ class LiteLLMProvider(LLMProvider):
             "stream": True,
         }
 
+        # Apply model-specific overrides (same as chat())
+        self._apply_model_overrides(model, kwargs)
+
+        # Pass api_key directly — more reliable than env vars alone
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+
+        # Pass api_base for custom endpoints
         if self.api_base:
             kwargs["api_base"] = self.api_base
+
+        # Pass extra headers (e.g. APP-Code for AiHubMix)
+        if self.extra_headers:
+            kwargs["extra_headers"] = self.extra_headers
 
         if tools:
             kwargs["tools"] = tools

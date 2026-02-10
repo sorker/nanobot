@@ -45,10 +45,23 @@ class SSERequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 class SSEMessageBody(BaseModel):
-    """SSE消息体 — message 字段的结构."""
+    """SSE消息体 — message 字段的结构.
+
+    文件类消息 (message_type = image | file | video) 使用 ``files`` 字段:
+        files: [{file_name, file_url, file_type, file_desc, index?}]
+    """
 
     content: str | None = Field(default=None, description="文本内容（非流式时为完整内容）")
-    files: list[dict[str, Any]] | None = Field(default=None, description="文件结果列表")
+    files: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "文件列表。每项: {file_name: str, file_url: str, file_type: str, "
+            "file_desc: str, index?: int}。"
+            "message_type=image 时为图片文件；"
+            "message_type=file 时为文本/其他文件；"
+            "message_type=video 时为视频文件。"
+        ),
+    )
     delta: str | None = Field(default=None, description="流式增量文本")
     tool_name: str | None = Field(default=None, description="工具名称（message_type=tool时）")
     tool_arguments: dict[str, Any] | None = Field(default=None, description="工具参数")
@@ -74,7 +87,7 @@ class SSEMessage(BaseModel):
     )
     message_type: str = Field(
         ...,
-        description="消息类型: text | html | tool | tool_result | thought | error | done",
+        description="消息类型: text | html | image | file | video | tool | tool_result | thought | error | done",
     )
     error: str | None = Field(default=None, description="错误信息")
     message: SSEMessageBody | None = Field(default=None, description="消息体")

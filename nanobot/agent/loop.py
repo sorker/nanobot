@@ -22,6 +22,9 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.oss import OSSUploadFileTool, OSSUploadTextTool
 from nanobot.agent.tools.cron import CronTool
+
+# 触发 AUTO_REGISTER_DEPS 工具的模块加载（确保 __subclasses__ 可被发现）
+import nanobot.agent.tools  # noqa: F401
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
 from nanobot.utils.oss_service import OSSService
@@ -120,6 +123,13 @@ class AgentLoop:
         if oss_service.is_enabled():
             self.tools.register(OSSUploadFileTool(oss_service))
             self.tools.register(OSSUploadTextTool(oss_service))
+
+        # 自动注册声明了 AUTO_REGISTER_DEPS 的工具（如 EduSVGTool, EduDocTool）
+        self.tools.auto_register_all({
+            "provider": self.provider,
+            "oss_service": oss_service,
+        })
+        
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
@@ -592,15 +602,28 @@ class AgentLoop:
                     # Emit tool call event (same turn_msg_id)
                     yield emitter.emit_tool_call(tc_name, tc_args, turn_msg_id)
 
-                    # Execute
-                    result = await self.tools.execute(tc_name, tc_args)
+                    # Execute (with progress-event draining for supported tools)
+                    result = None
+                    tool_instance = self.tools.get(tc_name)
+                    if tool_instance and hasattr(tool_instance, "_progress_queue"):
+                        async for is_sse, value in self._execute_with_progress(
+                            tool_instance, tc_name, tc_args, ctx, emitter, turn_msg_id,
+                        ):
+                            if is_sse:
+                                # SSE event string — yield to client
+                                yield value
+                            else:
+                                # Final tool result string
+                                result = value
+                    else:
+                        result = await self.tools.execute(tc_name, tc_args)
 
                     # Emit tool result event (same turn_msg_id)
-                    yield emitter.emit_tool_result(tc_name, result, turn_msg_id)
+                    yield emitter.emit_tool_result(tc_name, result or "", turn_msg_id)
 
                     # Add tool result to messages
                     messages = self.context.add_tool_result(
-                        messages, tc_id, tc_name, result
+                        messages, tc_id, tc_name, result or ""
                     )
 
                 # Continue loop for next LLM turn
@@ -670,14 +693,26 @@ class AgentLoop:
                         tool_call.name, tool_call.arguments, turn_msg_id
                     )
 
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    # Execute (with progress-event draining for supported tools)
+                    result = None
+                    tool_instance = self.tools.get(tool_call.name)
+                    if tool_instance and hasattr(tool_instance, "_progress_queue"):
+                        async for is_sse, value in self._execute_with_progress(
+                            tool_instance, tool_call.name, tool_call.arguments, ctx, emitter, turn_msg_id,
+                        ):
+                            if is_sse:
+                                yield value
+                            else:
+                                result = value
+                    else:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
 
                     yield emitter.emit_tool_result(
-                        tool_call.name, result, turn_msg_id
+                        tool_call.name, result or "", turn_msg_id
                     )
 
                     messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
+                        messages, tool_call.id, tool_call.name, result or ""
                     )
                 continue
 
@@ -698,6 +733,110 @@ class AgentLoop:
         session.add_message("user", user_text)
         session.add_message("assistant", final_content)
         self.sessions.save(session)
+
+    # ------------------------------------------------------------------
+    # Progress-reporting tool execution helper
+    # ------------------------------------------------------------------
+
+    async def _execute_with_progress(
+        self,
+        tool_instance: Any,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        ctx: "RequestContext",
+        emitter: "SSEEmitter",
+        message_id: str,
+    ) -> AsyncIterator[tuple[bool, str]]:
+        """Execute a progress-reporting tool while draining its event queue.
+
+        For tools that have a ``_progress_queue`` attribute (e.g. EduDocTool,
+        EduSVGTool), this method:
+
+        1. Injects ``session_id``, ``request_id``, and a progress queue.
+        2. Runs the tool execution as an :func:`asyncio.create_task`.
+        3. Concurrently drains the queue, yielding SSE events:
+           - ``"step"`` events  → ``emitter.emit_progress()``
+           - ``"html_delta"``   → ``emitter.emit_html_delta()``
+        4. Once the task completes, drains any remaining events, then
+           yields the final result string.
+
+        Yields:
+            Tuples of ``(is_sse_event, value)``:
+            - ``(True, sse_string)`` for SSE events to forward to the client
+            - ``(False, result_string)`` for the final tool result (always last)
+        """
+        queue: asyncio.Queue = asyncio.Queue()
+        tool_instance._progress_queue = queue
+
+        # Inject SSE context identifiers for OSS object_key construction
+        if hasattr(tool_instance, "_session_id"):
+            tool_instance._session_id = ctx.session_id
+        if hasattr(tool_instance, "_request_id"):
+            tool_instance._request_id = ctx.request_id
+
+        # Launch tool execution concurrently
+        exec_task = asyncio.create_task(
+            self.tools.execute(tool_name, tool_args)
+        )
+
+        try:
+            # Drain progress events while tool is running
+            while not exec_task.done():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.3)
+                    sse_str = self._progress_event_to_sse(event, emitter, message_id)
+                    if sse_str:
+                        yield (True, sse_str)
+                except asyncio.TimeoutError:
+                    continue
+
+            # Drain remaining events after task finishes
+            while not queue.empty():
+                try:
+                    event = queue.get_nowait()
+                    sse_str = self._progress_event_to_sse(event, emitter, message_id)
+                    if sse_str:
+                        yield (True, sse_str)
+                except asyncio.QueueEmpty:
+                    break
+
+            # Yield the final result
+            result = await exec_task
+            yield (False, result)
+
+        except Exception as e:
+            logger.error(f"Progress-reporting tool execution error: {e}")
+            if not exec_task.done():
+                exec_task.cancel()
+            yield (False, f"Error executing {tool_name}: {str(e)}")
+        finally:
+            tool_instance._progress_queue = None
+
+    @staticmethod
+    def _progress_event_to_sse(
+        event: dict[str, Any],
+        emitter: "SSEEmitter",
+        message_id: str,
+    ) -> str | None:
+        """Convert a progress event dict to an SSE string."""
+        if not event or not isinstance(event, dict):
+            return None
+        evt_type = event.get("type", "")
+        if evt_type == "step":
+            return emitter.emit_progress(event.get("message", ""), message_id)
+        elif evt_type == "html_delta":
+            content = event.get("content", "")
+            if content:
+                return emitter.emit_html_delta(content, message_id)
+        elif evt_type in ("image", "file", "video"):
+            files = event.get("files")
+            if files:
+                return emitter.emit_files(
+                    files=files,
+                    message_type=evt_type,
+                    message_id=message_id,
+                )
+        return None
 
     # ------------------------------------------------------------------
     # Helpers

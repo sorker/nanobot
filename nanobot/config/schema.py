@@ -1,7 +1,7 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings
 
 
@@ -180,7 +180,10 @@ class OSSConfig(BaseModel):
     """Alibaba Cloud OSS configuration."""
     access_key_id: str = ""
     access_key_secret: str = ""
-    bucket_name: str = ""
+    bucket_name: str = Field(
+        default="",
+        validation_alias=AliasChoices("bucket_name", "bucket"),
+    )
     endpoint: str = "oss-cn-shanghai.aliyuncs.com"
     domain: str = ""
     region: str = "cn-shanghai"

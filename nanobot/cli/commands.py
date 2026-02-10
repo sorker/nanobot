@@ -320,10 +320,11 @@ def _make_provider(config):
 
 @app.command()
 def gateway(
-    port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
+    port: int = typer.Option(18790, "--port", "-p", help="SSE server port"),
+    host: str = typer.Option("0.0.0.0", "--host", help="SSE server host"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
-    """Start the nanobot gateway."""
+    """Start the nanobot gateway (channels + SSE server)."""
     from nanobot.config.loader import load_config, get_data_dir
     from nanobot.bus.queue import MessageBus
     from nanobot.agent.loop import AgentLoop
@@ -332,12 +333,14 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
+    from nanobot.sse.handler import SSEHandler
+    from nanobot.sse.app import create_app
     
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
     
-    console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
+    console.print(f"{__logo__} Starting nanobot gateway on {host}:{port}...")
     
     config = load_config()
     bus = MessageBus()
@@ -396,6 +399,10 @@ def gateway(
     # Create channel manager
     channels = ChannelManager(config, bus, session_manager=session_manager)
     
+    # Create SSE server (shares the same agent instance)
+    sse_handler = SSEHandler(agent)
+    fastapi_app = create_app(sse_handler)
+    
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
@@ -406,14 +413,23 @@ def gateway(
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
     
     console.print(f"[green]✓[/green] Heartbeat: every 30m")
+    console.print(f"[green]✓[/green] Model: {config.agents.defaults.model}")
+    console.print(f"[green]✓[/green] SSE Endpoint: POST http://{host}:{port}/v1/chat/completions")
+    console.print(f"[green]✓[/green] Health: GET  http://{host}:{port}/health")
     
     async def run():
+        import uvicorn
+        uvi_config = uvicorn.Config(
+            fastapi_app, host=host, port=port, log_level="info"
+        )
+        uvi_server = uvicorn.Server(uvi_config)
         try:
             await cron.start()
             await heartbeat.start()
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
+                uvi_server.serve(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")
@@ -421,6 +437,7 @@ def gateway(
             cron.stop()
             agent.stop()
             await channels.stop_all()
+            uvi_server.should_exit = True
     
     asyncio.run(run())
 
@@ -445,6 +462,7 @@ def sse(
     from nanobot.agent.loop import AgentLoop
     from nanobot.session.manager import SessionManager
     from nanobot.cron.service import CronService
+    from nanobot.cron.types import CronJob
     from nanobot.sse.handler import SSEHandler
     from nanobot.sse.app import create_app
 
@@ -478,6 +496,26 @@ def sse(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
     )
+
+    # Set cron callback (was previously missing)
+    async def on_cron_job(job: CronJob) -> str | None:
+        """Execute a cron job through the agent."""
+        response = await agent.process_direct(
+            job.payload.message,
+            session_key=f"cron:{job.id}",
+            channel=job.payload.channel or "cli",
+            chat_id=job.payload.to or "direct",
+        )
+        if job.payload.deliver and job.payload.to:
+            from nanobot.bus.events import OutboundMessage
+            await bus.publish_outbound(OutboundMessage(
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to,
+                content=response or ""
+            ))
+        return response
+    cron.on_job = on_cron_job
+
     handler = SSEHandler(agent)
     fastapi_app = create_app(handler)
 
@@ -485,8 +523,25 @@ def sse(
     console.print(f"[green]✓[/green] Endpoint: POST http://{host}:{port}/v1/chat/completions")
     console.print(f"[green]✓[/green] Health: GET  http://{host}:{port}/health")
 
-    import uvicorn
-    uvicorn.run(fastapi_app, host=host, port=port, log_level="info")
+    cron_status = cron.status()
+    if cron_status["jobs"] > 0:
+        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
+
+    async def run():
+        import uvicorn
+        uvi_config = uvicorn.Config(
+            fastapi_app, host=host, port=port, log_level="info"
+        )
+        uvi_server = uvicorn.Server(uvi_config)
+        try:
+            await cron.start()
+            await uvi_server.serve()
+        except KeyboardInterrupt:
+            console.print("\nShutting down...")
+            cron.stop()
+            uvi_server.should_exit = True
+
+    asyncio.run(run())
 
 
 # ============================================================================

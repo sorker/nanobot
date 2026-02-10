@@ -17,6 +17,8 @@ from nanobot.agent.tools.grep import GrepTool
 from nanobot.agent.tools.weather import WeatherTool
 from nanobot.agent.tools.process import ProcessTool
 from nanobot.agent.tools.oss import OSSUploadFileTool, OSSUploadTextTool
+from nanobot.agent.tools.edu_svg import EduSVGTool
+from nanobot.agent.tools.edu_doc import EduDocTool
 
 __all__ = [
     "Tool",
@@ -42,4 +44,7 @@ __all__ = [
     # OSS tools
     "OSSUploadFileTool",
     "OSSUploadTextTool",
+    # Education tools
+    "EduSVGTool",
+    "EduDocTool",
 ]

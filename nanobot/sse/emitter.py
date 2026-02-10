@@ -88,6 +88,61 @@ class SSEEmitter:
         )
 
     # ------------------------------------------------------------------
+    # HTML (streaming content generation)
+    # ------------------------------------------------------------------
+
+    def emit_html_delta(self, delta: str, message_id: str | None = None) -> str:
+        """Streaming HTML content delta (e.g. lesson-plan generation)."""
+        return self._build(
+            message_type="html",
+            message=SSEMessageBody(delta=delta),
+            message_id=message_id,
+        )
+
+    def emit_html_complete(self, content: str, message_id: str | None = None) -> str:
+        """Complete HTML content."""
+        return self._build(
+            message_type="html",
+            status="completed",
+            message=SSEMessageBody(content=content),
+            message_id=message_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Files / Images / Videos
+    # ------------------------------------------------------------------
+
+    def emit_files(
+        self,
+        files: list[dict],
+        message_type: str = "file",
+        message_id: str | None = None,
+    ) -> str:
+        """Send file(s) to the client.
+
+        Args:
+            files: [{file_name, file_url, file_type, file_desc, index?}]
+            message_type: "image" | "file" | "video"
+        """
+        return self._build(
+            message_type=message_type,
+            message=SSEMessageBody(files=files),
+            message_id=message_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Progress (intermediate step messages during long tool execution)
+    # ------------------------------------------------------------------
+
+    def emit_progress(self, message: str, message_id: str | None = None) -> str:
+        """Intermediate progress/step message during tool execution."""
+        return self._build(
+            message_type="text",
+            message=SSEMessageBody(delta=f"💡 {message}\n"),
+            message_id=message_id,
+        )
+
+    # ------------------------------------------------------------------
     # Tool
     # ------------------------------------------------------------------
 

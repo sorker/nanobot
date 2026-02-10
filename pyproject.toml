@@ -46,9 +46,15 @@ process = [
 feishu = [
     "lark-oapi>=1.0.0",
 ]
+image = [
+    "Pillow>=10.0.0",
+    "cairosvg>=2.7.0",
+]
 all = [
     "psutil>=5.9.0",
     "lark-oapi>=1.0.0",
+    "Pillow>=10.0.0",
+    "cairosvg>=2.7.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -75,6 +81,8 @@ include = [
     "nanobot/**/*.py",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
+    "nanobot/skills/**/*.html",
+    "nanobot/skills/**/*.json",
 ]
 
 [tool.hatch.build.targets.sdist]
